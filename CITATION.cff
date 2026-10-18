@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the associated article and this software archive."
+title: "FLUX scRNA-seq analysis code"
+type: software
+license: MIT
+authors:
+  - family-names: Chun
+    given-names: Changho
+  - family-names: Bae
+    given-names: Yeji
+  - family-names: Seong
+    given-names: Juyoung
+preferred-citation:
+  type: article
+  title: "FLUX: Facilitated long-term uninterrupted exposure of retinoic acid enhances transcriptomic and electrophysiological maturation of iPSC-derived motor neurons"
+  journal: "Nature Communications"
+  authors:
+    - family-names: Seong
+      given-names: Juyoung
+    - family-names: Chun
+      given-names: Changho
+    - family-names: Kim
+      given-names: Minju
+    - family-names: Bae
+      given-names: Yeji
+    - family-names: Park
+      given-names: Jaehyun
+    - family-names: Kim
+      given-names: Junyoung
+    - family-names: Kang
+      given-names: Joo H.
+    - family-names: Park
+      given-names: Tae-Eun
+    - family-names: Bothwell
+      given-names: Mark
+    - family-names: Smith
+      given-names: Alec S. T.
+    - family-names: Mack
+      given-names: David L.
+    - family-names: Joo
+      given-names: Jinmyoung

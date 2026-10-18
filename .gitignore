@@ -48,3 +48,14 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Project-specific: data and outputs are not tracked
+data/
+results/
+*.RDS
+*.rds
+*.h5ad
+*.pt
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
