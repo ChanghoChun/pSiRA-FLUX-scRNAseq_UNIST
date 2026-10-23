@@ -1,0 +1,988 @@
+---
+title: "01_preprocessing_QC"
+author: "Yeji Bae"
+date: "`r Sys.Date()`"
+format: html
+---
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(glue)
+
+library(Seurat)
+library(glmGamPoi)
+library(scDblFinder)
+
+# output folders
+for (d in c("../results/individual_objs", "../results/scDblFinder", "../results/QC",
+           "../results/soupX", "../figures/soupX")) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+```
+
+# Define Functions
+```{r}
+colors_vector <- c(RColorBrewer::brewer.pal(12, "Paired"), 
+            "blue1", "darkslategray3", "burlywood3", "#984EA3",
+            "seagreen1", "yellow2", "orchid", "darkblue", 
+            "lightsalmon2","slateblue1","lightskyblue4",
+            "azure2", "chartreuse1",  "lemonchiffon2",
+            "deeppink", "darkslategray1", "green4", "navajowhite", 
+            "brown4", "darkgoldenrod2", "deepskyblue1", "lightpink") %>% 
+  # c(., ggpubr::get_palette("jco", 5)) %>% 
+  c("mediumpurple4","magenta", "peru") %>% 
+  c(ggsci::pal_igv()(51))
+
+length(colors_vector) 
+
+```
+
+# DATA 
+
+To develope a novel method to enhance physiological relevance of iPSC-MNs using porous silica microparticles as a bioreactor during the differentiation. Three single-cell RNA sequencing (scRNA-seq) libraries— (1) Pulsatile, (2) PSiMP, and (3)FLUX—were generated from iPSC-derived motor neuron differentiation experiments. However, each experiment used a different approach in terms of how the porous silica microparticles were applied.
+
+## Sample Manifest
+
+```{r}
+# manifest
+sample_manifest <- data.frame( path = dir("../data", pattern = "_raw$", full.names = TRUE) ) %>%
+  mutate(sample = gsub("_raw", "", dir("../data/", pattern = "_raw$")),
+         organism = 'human',
+         cell_type = 'iPSC', 
+         tissue = 'motor_neuron') %>%
+  dplyr::select(2:5, 1)
+sample_manifest
+
+# add metrics_summary 
+metrics_list <- lapply(sample_manifest$path, function(p) {
+  read.csv(file.path(p, "metrics_summary.csv")) %>%
+  janitor::clean_names() 
+})
+metrics_df <- do.call(rbind, metrics_list)
+# sample_manifest <- cbind(sample_manifest, metrics_df) %>%
+#     mutate(across(.cols = c(estimated_number_of_cells:number_of_reads, total_genes_detected:median_umi_counts_per_cell),
+#                 .fns =  ~as.numeric(gsub(",","", .x)))) %>%
+#     rename_at(vars(valid_barcodes:fraction_reads_in_cells), ~paste0(.,"_percent")) %>%
+#     mutate(across(.cols = matches("_percent$"),
+#                 .fns =  ~as.numeric(gsub("\\%","", .x))))
+
+
+# add raw data path 
+expn_mats <- dir("../data/", pattern = "filtered_feature_bc_matrix", recursive = TRUE, full.names = TRUE) 
+expn_mats <- gsub(".tar.gz", "/", expn_mats)
+summaries <- dir("../data", pattern = "*metrics_summary.csv", recursive = TRUE, full.names = TRUE)
+raw_mats <- dir("../data", pattern = "raw_feature_bc", recursive = TRUE, full.names = TRUE)
+raw_mats <- gsub(".tar.gz", "/", raw_mats)
+
+sample_manifest <- sample_manifest %>%
+  mutate(expression_matrix_path = expn_mats,
+                              raw_matrix_path = raw_mats,
+                              summary_path=summaries)
+sample_manifest
+```
+
+```{r}
+qc_plots_data <- sample_manifest %>% 
+  select(sample,
+         estimated_number_of_cells,
+         median_genes_per_cell, 
+         number_of_reads,
+         sequencing_saturation_percent, 
+         valid_barcodes_percent, 
+         reads_mapped_confidently_to_genome_percent,
+         reads_mapped_confidently_to_transcriptome_percent, 
+         total_genes_detected) %>% 
+  pivot_longer(cols = -c(sample),
+               names_to = "stat", 
+               values_to = "value") %>% 
+  mutate(sample_id=factor(sample, levels=unique(sample)))
+```
+
+```{r}
+p1 <- ggplot(qc_plots_data, aes(x = stat, y=value)) +
+  geom_boxplot(outlier.color = NA) +
+  geom_point(aes(color=sample_id), position = position_jitter(width = 0.2), 
+             size=1.5) +
+  facet_wrap(~stat, scales = 'free') +
+  scale_color_manual(values=colors_vector) +
+  theme_classic() +
+  theme(legend.position = 'top', 
+        text = element_text(size=8))
+# pdf("../results/QC/cellranger_qc_summary.pdf")
+p1
+# dev.off()
+```
+
+
+## Genome Reference 
+```{r eval=FALSE}
+suppressPackageStartupMessages(library(ensembldb))
+
+#Warning: Could not determine length for all seqnames
+db <- ensDbFromGtf(gtf = "refdata-gex-GRCh38-2020-A/genes/genes.gtf", # 10x Genomics Cell Ranger reference
+                   genomeVersion = "GRCh38",
+                   organism = "Homo_sapiens",
+                   version = 98)
+
+
+# edb
+edb <- ensembldb::EnsDb(db)
+gids <- ensembldb::keys(edb, keytype = "GENEID")
+idmap <- AnnotationDbi::select(edb, keytype="GENEID", 
+                      keys = gids, 
+                      columns = c("GENEID","GENEBIOTYPE","GENENAME","SYMBOL")) %>% 
+  janitor::clean_names()
+
+head(idmap)
+dim(idmap) #38606
+```
+
+## Generate iPSC Sobj
+
+```{r}
+filtered_matrices <- paste0(sample_manifest$path, "/filtered_feature_bc_matrix/")
+names(filtered_matrices) <- sample_manifest$sample
+```
+
+```{r}
+seurat_objs <- purrr::map(seq_along(filtered_matrices), function(i){
+  id <- names(filtered_matrices)[i]
+  path <- filtered_matrices[i]
+  print(path)
+  counts <- Read10X(path)
+  seurat_obj <-  CreateSeuratObject(counts=counts,
+                                    assay="RNA",
+                                    project=id)
+  
+  seurat_obj <- PercentageFeatureSet(seurat_obj,
+                                   assay="RNA",
+                                   pattern = "^MT-",
+                                   col.name = "percent.mt")
+  seurat_obj <- PercentageFeatureSet(seurat_obj,
+                                     assay="RNA",
+                                     pattern = "^RP[SL]", 
+                                     col.name = "percent.ribo")
+})
+names(seurat_objs) <- names(filtered_matrices)
+# seurat_objs$FLUX$percent.ribo %>% quantile()
+# seurat_objs$FLUX$percent.mt %>%  quantile()
+
+if(exists("seurat_objs")){
+  job::job({
+      dir.create("../results", recursive = TRUE)
+      base::saveRDS(seurat_objs, "../results/individual_objs/sobj_list.RDS")
+  }, import = c("seurat_objs"))
+}
+```
+
+```{r}
+if(!exists("seurat_objs")){
+  seurat_objs <- readRDS("../results/individual_objs/sobj_list.RDS")
+}
+
+# TODO 
+# missing 13,192???- need to map these. 
+table(rownames(seurat_objs$FLUX@assays$RNA) %in% idmap$genename) 
+merged_obj <- merge(x = seurat_objs$FLUX,
+                    y = seurat_objs[grep("FLUX", names(seurat_objs), invert = TRUE)],
+                    add.cell.ids=names(filtered_matrices),
+                    project="iPSC")
+# An object of class Seurat 
+# 36601 features across 23212 samples within 1 assay 
+# Active assay: RNA (36601 features, 0 variable features)
+#  3 layers present: counts.FLUX, counts.pSiMP, counts.Pulsatile
+ 
+if(exists("merged_obj")) {
+  job::job({
+      saveRDS(merged_obj,"../results/sobj_merged.RDS")
+  }, import = c("merged_obj"))
+}
+```
+
+
+# QC
+
+## nCount, nFeature, mt, ribo
+* Low nFeature_RNA for a cell indicates that it may be dead/dying or an empty droplet.
+* High nCount_RNA and/or nFeature_RNA indicates that the "cell" may in fact be a doublet (or multiplet).
+
+```{r eval=FALSE, fig.height=5, fig.width=10}
+# pdf("../results/QC/QC_metrics_noFilter.pdf", height = 10, width = 15)
+Idents(merged_obj) <- merged_obj$orig.ident
+VlnPlot(
+  object = merged_obj,
+  # features = c("nCount_RNA", "nFeature_RNA", "percent.mt","percent.ribo"),
+  features = c("percent.mt"),
+  ncol = 2,
+  alpha = 0.5,
+  pt.size = 0
+)
+# dev.off()
+```
+
+## Preprocess QC 
+
+https://satijalab.org/seurat/articles/sctransform_vignette.html
+
+```{r eval=FALSE}
+merged_obj <- SCTransform(merged_obj, vst.flavor = "v2", verbose = T) %>%
+    RunPCA(npcs = 50, verbose = T) %>%
+    RunUMAP(n.components = 3L, reduction = "pca", dims = 1:50, verbose = T) %>%
+    FindNeighbors(reduction = "pca", dims = 1:50, verbose = T) %>%
+    FindClusters(resolution = 0.8, verbose = T)
+# saveRDS(merged_obj, "../results/sobj_merged_SCT_UMAP.RDS")
+merged_obj <- readRDS("../results/sobj_merged_SCT_UMAP.RDS")
+
+# dev.off("../results/QC/sobj_merged_SCT_UMAP_noFilter_cluster_origident.pdf")
+DimPlot(merged_obj)
+DimPlot(merged_obj, group.by = "orig.ident")
+# dev.off()
+```
+
+```{r eval=FALSE}
+# include RNA lognormalized counts for certain data processing steps that require it. 
+DefaultAssay(merged_obj) <- "RNA"
+merged_obj <- NormalizeData(merged_obj, normalization.method = "LogNormalize")
+merged_obj <- FindVariableFeatures(merged_obj, nfeatures = 3000)
+```
+
+```{r}
+# Cannot visualize the 3000 var genes in SCT with layers. VariableFeaturePlot(merged_obj)
+# Instead Extract the individual var feature dataframes per individual sample. 
+DefaultAssay(merged_obj) <- "SCT"
+top10 <- head(VariableFeatures(merged_obj), 10) # Identify the 10 most highly variable genes
+var_feats_df <- SCTResults(merged_obj, slot = "feature.attributes")
+```
+
+```{r fig.height=10, fig.width=10, eval=FALSE}
+# pdf("../results/QC/sobj_merged_SCT_UMAP_noFilter.pdf", height = 15, width = 15)
+DimPlot(merged_obj, label = T, repel = T, label.size = 7) + 
+  scale_color_manual(values = colors_vector) +
+  ggtitle("Unsupervised clustering")
+# dev.off()
+
+# pdf("../results/QC/sobj_merged_SCT_PCA_loadings_noFilter.pdf", height = 10, width = 10)
+VizDimLoadings(merged_obj, dims = 1:4, reduction = "pca")
+# dev.off()
+
+n_cells_barplot <- merged_obj@meta.data %>% 
+  mutate(id=factor(orig.ident, levels=unique(orig.ident))) %>% 
+  ggplot(., aes(x=id,fill=id)) +
+  geom_bar() +
+  scale_fill_manual(values=colors_vector) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=25, vjust=1, hjust=1))
+
+# png("../results/QC/sobj_merged_number_cells_per_sample_noFilter.png", height = 5, width = 8, units = "in", res = 150)
+n_cells_barplot
+# dev.off()
+```
+
+# Doublet Scores (scDblFinder)
+
+scDblFinder Operation:
+  * The input data for scDblFinder (denoted x below) can be either i) a count matrix (full or sparse), with genes/features as rows and cells/droplets as columns; or ii) an object of class SingleCellExperiment. 
+  * the object should not contain empty drops, but should **not otherwise have undergone very stringent filtering** (which would bias the estimate of the doublet rate). 
+> initial processing, artificial doublets (either random or between-cluster, depending on the settings) are generated, then a nearest neighbor (kNN) network is generated. 
+> Rather than selecting a single neighborhood size, as most kNN-based methods do, scDblFinder gathers statistics at various neighborhood sizes, thereby enabling the downstream classifier to select the most informative size(s), which might also differ across the expression space. 
+
+Doublet Considerations:
+  * https://bioinformatics-core-shared-training.github.io/CrukCiScRnaSeqMatDev/AnaWiSce/AnaCourse1/BookDownCourse1/doubletDetectionTop.html
+  * "Doublet detection procedures should only be applied to libraries generated in the same experimental batch. It is obviously impossible for doublets to form between two cells that were captured separately." 
+  * "It is also difficult to interpret doublet predictions in data containing cellular trajectories."
+
+10x Doublets expected:
+  * https://kb.10xgenomics.com/hc/en-us/articles/360001378811-What-is-the-maximum-number-of-cells-that-can-be-profiled-
+  * closer to 4.8% expected by the docs, though many must be excluded by CellRanger in the filtered_bc_matrix
+
+Benchmarks:
+ - https://f1000research.com/articles/10-979/v2#ref19
+ - https://arxiv.org/pdf/2101.08860.pdf
+ - https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7897250/
+
+
+Use `scDblFinder()` if you want to detect and remove doublets.
+Use `computeDoubletDensity()` if you want to visualize doublet-prone regions, explore scores, or plug it into your own hybrid model.
+```{r eval=FALSE}
+if(!exists("seurat_objs")){
+  seurat_objs <- readRDS("../results/individual_objs/sobj_list.RDS")
+}
+
+job::job({
+  
+  doublet_scores <- purrr::map_dfr(names(seurat_objs), function(x){
+    
+        outfile <- glue::glue("../results/individual_objs/{x}_SCT_doublets_sobj.RDS")
+        
+        if(!file.exists(outfile)){
+          
+          print(glue("Processing {x}"))
+          # normalize
+          obj <- SCTransform(seurat_objs[[x]], method = "glmGamPoi")
+          
+          # cluster
+          obj <- obj %>%
+            RunPCA(npcs = 50, verbose = F) %>%
+            RunUMAP(n.components = 3, reduction = "pca",
+                    dims = 1:50, verbose = F) %>%
+            FindNeighbors(reduction = "pca", dims = 1:50, verbose = F) %>%
+            FindClusters(resolution = 0.8, verbose = F)
+          
+          print(glue("SCE to doublet finder {x}"))
+          sce <- Seurat::as.SingleCellExperiment(obj, assay = "SCT")
+          doublets <- computeDoubletDensity(sce,  
+                                            k = 50, #default
+                                            subset.row = VariableFeatures(obj))
+          doublets_clust <- scDblFinder(sce,
+                                        clusters = "seurat_clusters", 
+                                        nfeatures = VariableFeatures(obj), 
+                                        k = NULL, #default - allow alg to select K from examining a number of different values. 
+                                        returnType = "table")
+          
+          print(glue("Update Metadata for {x}"))
+          obj <- AddMetaData(obj, metadata = as.data.frame(obj@reductions$umap@cell.embeddings))
+          obj$doublet_score <- doublets
+          obj$doublet_outlier <- obj$doublet_score > quantile(obj$doublet_score, probs = c(0.98)) # assume 2% doublet rate?
+          obj <- AddMetaData(obj, metadata = dplyr::filter(as.data.frame(doublets_clust), type =="real"))
+          
+          print(glue("Saving {outfile}"))
+          base::saveRDS(obj,outfile)
+        }else{
+          print(glue("Reading in {x}"))
+          obj <- readRDS(outfile)
+        }
+        
+        meta <- as.data.frame(obj@meta.data)
+        return(meta)
+      })
+  # save the results in a csv file
+  write.csv(doublet_scores, "../results/scDblFinder/doublet_scores.csv", row.names = TRUE)
+}, import = c("seurat_objs"))
+```
+
+```{r}
+doublet_scores <- purrr::map_dfr(dir("../results/scDblFinder", 
+                                     pattern = "doublet_scores.csv",
+                                     full.names = TRUE), function(x){
+  read.csv(x) %>%
+  mutate(id=factor(orig.ident, levels=unique(orig.ident)),
+         barcode=X)
+}) %>%
+  left_join(., sample_manifest, by=c("orig.ident"="sample")) %>%
+  rename_at(vars(cluster,SCT_snn_res.0.8, seurat_clusters), ~paste0(.,"_per_sample")) %>%
+  arrange(orig.ident) %>% 
+  mutate(sample_id=factor(orig.ident, levels=unique(orig.ident))) %>% 
+  arrange(sample_id) %>%
+  dplyr::select(sample_id, barcode, everything(), -X)
+
+head(doublet_scores)
+dim(doublet_scores) #23212    70
+# table(doublet_scores$sample)
+```
+
+```{r eval=FALSE}
+purrr::map(unique(doublet_scores$orig.ident), function(x){
+  
+  basefile <- glue("../results/scDblFinder/iPSC_MN_doublet_scores_{x}")
+  # basefile <- glue("../results/scDblFinder/iPSC_MN_doublet_scores_FLUX")
+  chk <- doublet_scores %>% 
+    dplyr::filter(orig.ident == x)
+  
+  p1 <- ggplot(chk, aes(x=umap_1, y=umap_2, color = as.factor(seurat_clusters_per_sample))) +
+      geom_point(alpha=0.7) +
+      scale_color_manual(values=colors_vector) +
+      theme_classic()
+
+  p2 <-  ggplot(chk, aes(x=umap_1, y=umap_2, color = doublet_score)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_classic()
+  
+  p3 <- ggplot(chk, aes(x=umap_1, y=umap_2, color = doublet_outlier)) +
+    geom_point(alpha=0.7) +
+    scale_color_viridis_d(direction = -1) +
+    theme_classic()
+  
+  p4 <- ggplot(chk, aes(x=umap_1, y=umap_2, color = score)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_classic()
+  
+  p5 <- ggplot(chk, aes(x=umap_1, y=umap_2, color = class)) +
+    geom_point(alpha=0.7) +
+    scale_color_viridis_d() +
+    theme_classic()
+  
+  png(glue(basefile, "_computeDoubletDensity.png"), width = 20, height = 8, res=150, units = "in")
+  print(p1 + p2 + p3 + patchwork::plot_layout(guides = 'collect') + patchwork::plot_annotation(title = x))
+  dev.off()
+  
+  png(glue(basefile, "_scDblFinder.png"), width = 20, height = 8, res=150, units = "in")
+  print(p1 + p4 + p5 + patchwork::plot_layout(guides = 'collect') + patchwork::plot_annotation(title = x))
+  dev.off()
+
+})
+```
+
+```{r}
+pct_doubles_df <- doublet_scores %>% 
+    dplyr::select(orig.ident,barcode,
+         distanceToNearest,score,
+         class,matches("^ratio")) %>% 
+  mutate(id = factor(orig.ident, 
+                     levels = unique(orig.ident))) %>% 
+  group_by(id) %>% 
+  mutate(total_cells = n()) %>% 
+  ungroup() %>% 
+  group_by(id, total_cells, class) %>% 
+  dplyr::count(name = "number_of_cells") %>% 
+  ungroup() %>% 
+  mutate(percent_of_cells = round(number_of_cells / total_cells * 100, digits = 1))
+
+head(pct_doubles_df)
+# dim(pct_doubles_df)
+
+# pdf("../figures/scDblFinder/iPSC_doublet_scores_scDblFinder_barplot.pdf", height = 7, width = 12)
+doublet_scores %>% 
+  mutate(class=factor(class, levels=rev(c("doublet","singlet")))) %>% 
+ggplot(., aes(x=sample_id, fill=class)) +
+  geom_bar() +
+  # geom_col() +
+  scale_fill_manual(values=colors_vector) +
+  labs(y="number of cells",x="") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=25, vjust=1, hjust=1))
+# dev.off()
+```
+
+
+```{r fig.height=5, fig.width=10, eval=FALSE}
+# pdf("../figures/scDblFinder/iPSC_scDblFinder_noFilter_ridgePlot.pdf", height = 10, width = 10)
+ggplot(doublet_scores, aes(y=sample_id, x=score, fill=id)) +
+  ggridges::stat_density_ridges(quantile_lines = TRUE, 
+                                quantiles = 0.5, alpha=0.75, 
+                                scale = 0.9) +
+  geom_point(aes(color=sample_id), 
+             shape="|",
+             size=2,
+             alpha=0.7,
+             position = position_nudge(y=-0.15)) +
+  scale_fill_manual(values=colors_vector) +
+  scale_color_manual(values=colors_vector) +
+  theme_classic()
+# dev.off()
+```
+
+# Filter Cells 
+
+```{r}
+seurat_objs_dbls <- dir("../results/individual_objs", 
+                        pattern = "*_SCT_doublets_sobj.RDS", full.names = TRUE) %>% 
+  purrr::set_names(gsub("_SCT_doublets_sobj.RDS", "", basename(.)))
+seurat_objs_dbls
+```
+```{r eval=FALSE}
+job::job({
+  # loop through each sample and create dynamic filting thresholds
+  filter_objs <- purrr::map(names(seurat_objs_dbls), function(x){
+    
+        outfile <- glue::glue("../results/iPSC_{x}_filtered_sobj.RDS")
+        out_summary <- glue("../results/QC/iPSC_{x}_cell_filtering_threshold_summary.csv")
+        input <- readRDS(seurat_objs_dbls[x])
+    
+        if(!file.exists(outfile) | !file.exists(out_summary)){
+          
+          print(glue("Processing {x}"))
+          mito_outlier <- scuttle::isOutlier(input$percent.mt, type="higher")
+          rb_outlier <- scuttle::isOutlier(input$percent.ribo, type="lower")
+          ncount_outlier <- scuttle::isOutlier(input$nCount_RNA, type="higher")
+          nfeat_outlier <- scuttle::isOutlier(input$nFeature_RNA, type="higher")
+          
+          
+          mito_th <- attr(mito_outlier,which = "thresholds")["higher"]
+          rb_th <- attr(rb_outlier,which = "thresholds")["lower"]
+          ncount_th <- attr(ncount_outlier,which = "thresholds")["higher"]
+          nfeat_th <- attr(nfeat_outlier,which = "thresholds")["higher"]
+          
+          to_retain <- WhichCells(input, 
+                                  expression = 
+                                    nFeature_RNA > 200 & #at least 200 genes assayed per cell
+                                    percent.ribo > rb_th &
+                                    percent.mt < mito_th &
+                                    class == "singlet")
+          input$to_retain <- as.numeric(colnames(input) %in%  to_retain)
+          
+          d1 <- DimPlot(input)
+          f1 <- FeaturePlot(input, 
+                            features = c("percent.mt","percent.ribo","to_retain"),
+                            ncol=3)
+          
+          outplot <- glue("../figures/iPSC_{x}_filtered_sobj_UMAP.png")
+          png(outplot,height = 7, width = 20, units="in", res=150)
+          print(d1 + f1 + patchwork::plot_annotation(title=x) + patchwork::plot_layout(widths = c(0.5, 1)))
+          dev.off()
+          
+          merged_filt_obj <- subset(
+                          x = input,
+                          subset = 
+                            nFeature_RNA > 200 &
+                            percent.ribo > rb_th &
+                            percent.mt < mito_th &
+                            class == "singlet"
+                        )
+
+          print(glue("Saving {outfile}"))
+          base::saveRDS(merged_filt_obj, outfile)
+          # Save the thresholds to a file
+          ths <-  data.frame(sample=x,
+                           mito_th=mito_th,
+                           rb_th=rb_th,
+                           ncount_th=ncount_th,
+                           nfeat_th=nfeat_th,
+                           input_number_cells=ncol(input),
+                           output_number_cells=ncol(merged_filt_obj))
+          write.csv(ths,out_summary, row.names = FALSE)
+
+        }else{
+          print(glue("Reading in RDS results for {x}"))
+          merged_filt_obj <- readRDS(outfile)
+        }
+        return(merged_filt_obj)
+      })
+
+}, import = c("seurat_objs_dbls"))
+
+names(filter_objs) <- names(seurat_objs_dbls)
+
+filter_objs
+```
+
+```{r}
+threshold_summary <- purrr::map_dfr(dir("../results/QC/",
+                                        pattern = "filtering_threshold_summary.csv", 
+                                        full.names = TRUE), function(x){
+  read.csv(x)
+}) %>% 
+  mutate(id=sample) %>%
+  mutate(percent=round(output_number_cells/input_number_cells * 100, digits = 1)) %>% 
+  left_join(., sample_manifest, by=c("id"="sample")) %>% 
+  mutate(id=factor(id, levels=levels(doublet_scores$id))) %>% 
+  arrange(id)
+
+
+threshold_summary %>% head()
+dim(threshold_summary) #14 36
+# View(threshold_summary)
+```
+
+```{r fig.width=10}
+threshold_summary %>% 
+  pivot_longer(cols = c(input_number_cells,output_number_cells), 
+               names_to = "status",
+               values_to = "number_of_cells") %>% 
+  group_by(id) %>%
+  mutate_at(vars(percent), ~ifelse(duplicated(id), "", paste0(.,"%\nretained"))) %>%
+  ungroup()
+# png("../figures/QC/iPSC_filtered_seurat_barplot.png",height = 8, width = 12, unit="in", res=150)
+threshold_summary %>% 
+  pivot_longer(cols = c(input_number_cells,output_number_cells), 
+               names_to = "status",
+               values_to = "number_of_cells") %>% 
+  group_by(id) %>%
+  mutate_at(vars(percent), ~ifelse(duplicated(id), "", paste0(.,"%\nretained"))) %>%
+  ungroup() %>%
+
+ ggplot(., aes(y = number_of_cells, x = id, fill = status)) +
+    geom_col(position = position_dodge()) +
+    labs(x="") +
+    scale_y_continuous(limits = c(0, 10000)) +
+    geom_text(aes(label = percent), nudge_y = 300) +
+    scale_fill_viridis_d(option = "turbo", begin = 0.1) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle=25, vjust=1, hjust=1))
+# dev.off()
+```
+
+# SoupX 
+
+SoupX
+  * https://rawcdn.githack.com/constantAmateur/SoupX/204b602418df12e9fdb4b68775a8b486c6504fe4/inst/doc/pbmcTutorial.html
+  * https://academic.oup.com/gigascience/article/9/12/giaa151/6049831
+  * https://github.com/constantAmateur/SoupX/issues/44
+    * "Ideally you should run doublet removal first and exclude these cells when running SoupX, but it will make little practical difference." 
+  * https://github.com/constantAmateur/SoupX/issues/47
+
+
+While it is possible to run SoupX without clustering information, you will get far better results if some basic clustering is provided. Therefore, it is strongly recommended that you provide some clustering information to SoupX. 
+
+The contamination fraction is parametrised as rho in the code, with rho=0 meaning no contamination and rho=1 meaning 100% of UMIs in a droplet are soup.
+
+
+```{r eval=TRUE}
+library(SoupX)
+if(!exists("filter_objs")){
+  seurat_objs_filt <- dir("../results/", 
+                          pattern = "_filtered_sobj.RDS",
+                          full.names = TRUE) %>% 
+    purrr::set_names(gsub("_filtered_sobj.RDS","", basename(.)) %>%
+                gsub("iPSC_", "", .))
+
+  filter_objs <- purrr::map(seurat_objs_filt, function(x) {
+          obj <- readRDS(x)
+    })
+}
+length(filter_objs) # 3
+
+# define output directory locations
+outdirs <- glue("../results/soupX/{names(filter_objs)}") %>% 
+  as.character() %>% 
+  purrr::set_names(basename(.))
+
+#re-order the entries to match the sample manifest
+outdirs <- outdirs[sample_manifest$sample] 
+
+# Processes all data sets
+soup_channels <- list()
+for(dir in outdirs){
+  if(! dir %in% names(soup_channels)){
+    x <- basename(dir)
+    print(x)
+    subset <- sample_manifest %>%
+      dplyr::filter(sample == x)
+
+    # read in RAW dataset
+    raw_matrix_path <- gsub(x = subset$raw_matrix_path, pattern = ".tar.gz", "/") 
+    full_counts <- Read10X(raw_matrix_path)
+    
+    filt_obj <- filter_objs[[x]]
+    cell_counts <- LayerData(filt_obj, assay = "RNA", layer = "counts")
+    clusts <- filt_obj@meta.data$seurat_clusters
+    dim_red <- filt_obj@reductions$umap@cell.embeddings
+
+    sc <- SoupChannel(tod=full_counts,
+                      toc=cell_counts)
+    sc <- setClusters(sc, clusts)
+    sc <- suppressWarnings(setDR(sc, dim_red))
+    soup_channels[[x]] <- sc
+  }
+}
+length(soup_channels) # 3
+
+# save the filtered and raw bc counts soupX channel objects.
+job::job({
+  saveRDS(soup_channels, "../results/soupX/iPSC_soupX_channel_objs_list.RDS")
+}, import = c("soup_channels"))
+```
+
+
+
+
+
+
+```{r, eval=TRUE}
+if(!exists("soup_channels")){
+  soup_channels <- readRDS("../results/soupX/iPSC_soupX_channel_objs_list.RDS")
+}
+
+# Calculate estimate of contamination with soupX
+est_first_pass <- purrr::map(outdirs, function(dir){
+    min <- 1
+    sc <- soup_channels[[basename(dir)]]
+    outfile2 <- glue("../figures/soupX/{basename(dir)}_autoEstCont_figure.pdf")
+    
+     print(glue("Processing {dir}"))
+     # attempt to run the contamination estimate, but some samples will fail due celltype composition
+     tryCatch(expr = {
+      # estimate contamination fraction
+      adj_sc <-  autoEstCont(sc, tfidfMin = min,
+                             doPlot = FALSE,
+                             verbose = FALSE)
+  
+    }, error = function(err){
+      print(glue("{dir} Too homogenous for reliable estimate"))
+      return(NULL)
+    })
+     
+    # generate a plot with the estimated rho if estimate was generated
+    if(exists("adj_sc")){
+      pdf(outfile2, height = 7, width = 10)
+      autoEstCont(adj_sc, tfidfMin = min, verbose = FALSE)
+      dev.off()
+      return(adj_sc)
+    } else {
+      # or return the name of the sample that couldn't be analyzed
+      return(dir)
+    }
+})
+names(est_first_pass) <- names(outdirs)
+```
+
+
+```{r}
+# Manually adjust the missing datasets using the mean rho value from all other samples
+missing <- sapply(est_first_pass, function(x) is.character(x))
+ave_rho <- round(mean(sapply(est_first_pass[!missing],  function(x) unique(x$metaData$rho))), digits = 3)
+remaining_est <- purrr::map(names(est_first_pass[missing]), function(x){
+   sc <- soup_channels[[x]]
+    # set contamination fraction
+    adj_sc <-  setContaminationFraction(sc,ave_rho)
+})
+names(remaining_est) <- names(est_first_pass[missing])
+
+# save the results
+final_estimates <- c(est_first_pass[!missing], remaining_est)
+save_corrected_counts <- purrr::map(names(final_estimates), function(x){
+  outdir <- file.path("../results/soupX/", x)
+  if(!dir.exists(outdir)){
+    print(x)
+    out = adjustCounts(final_estimates[[x]])
+    DropletUtils::write10xCounts(outdir, out)
+  }
+})
+final_estimates
+
+job::job({
+  saveRDS(final_estimates, "../results/soupX/iPSC_soupX_channel_adj_objs_list.RDS")
+}, import = c("final_estimates"))
+```
+
+
+```{r eval=FALSE}
+library(tibble)
+estimates_df <- purrr::map_dfr(names(final_estimates), function(x){
+  final_estimates[[x]]$metaData %>% 
+    rownames_to_column("barcode") %>% 
+    mutate(sample = x)
+}) %>% 
+  mutate(id=factor(sample, levels=levels(doublet_scores$id)))
+
+head(estimates_df)
+table(estimates_df$id)
+# write.csv(estimates_df, "../results/soupX/iPSC_soupX_contamination_estimates.csv", row.names = FALSE)
+
+estimates_df <- read.csv("../results/soupX/iPSC_soupX_contamination_estimates.csv") %>% 
+  mutate(id=factor(sample, levels=levels(doublet_scores$id)))
+
+head(estimates_df)
+hist(estimates_df$rho, breaks = 10)
+unique(estimates_df$rho)
+```
+
+```{r}
+est_df_subset <- estimates_df %>% 
+  dplyr::select(id, rho) %>% 
+  distinct()  %>% 
+  mutate(id=factor(id, levels=levels(doublet_scores$id)))
+est_df_subset
+
+# est_plot <- 
+ggplot(est_df_subset, aes(x =  id, y=rho, fill = id)) +
+  geom_col() +
+  # scale_fill_manual(values = colors) +
+  geom_text(aes(label = rho)) + 
+  labs(title="SoupX Ambient DNA Contamination Estimates", y="contamination fraction", x="") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 25, vjust = 1, hjust = 1))
+
+# png("../figures/soupX/iPSC_contamination_estimates.png", height = 5, width = 8, units = "in", res = 150)
+est_plot
+# dev.off()
+```
+
+# Merge Filtered Objects
+```{r eval=FALSE}
+outs <- file.path("../results/soupX", c("FLUX", "pSiMP", "Pulsatile"))
+names(outs) <- basename(outs)
+
+metadata <- merged_obj@meta.data
+
+soupx_objs <- purrr::map(outs, function(res){
+
+  # res = outs[1]
+  counts <- Read10X(res)
+  id <- basename(res)
+  print(glue("{id}"))
+  
+  
+  mdata <- metadata[colnames(counts) %in% rownames(metadata),]
+  # rownames(mdata) <- mdata$barcode
+  # mdata <- as.data.frame(mdata)
+  # mdata
+    
+  seurat_obj <-  CreateSeuratObject(counts=counts, 
+                                    assay="RNA",
+                                    project = id, 
+                                    meta.data = mdata)
+  
+  seurat_obj <- PercentageFeatureSet(seurat_obj,
+                                 assay="RNA",
+                                 pattern = "^MT-",
+                                 col.name = "filtered_percent.mt")
+  
+  seurat_obj <- PercentageFeatureSet(seurat_obj,
+                                     assay="RNA",
+                                     pattern = "^RP[SL]", 
+                                     col.name = "filtered_percent.ribo")
+})
+
+# reorder the objects
+soupx_objs <- soupx_objs[levels(threshold_summary$id)] # FLUX pSiMP Pulsatile # TODO: might need to change the order later? 
+```
+
+```{r eval=FALSE}
+job::job({
+  sapply(names(soupx_objs), function(x) saveRDS(soupx_objs[[x]],glue("../results/soupX/iPSC_{x}_filtered_soupX_seurat_obj.RDS")))
+}, import = c("soupx_objs"))
+```
+
+```{r eval=FALSE}
+merged_filt_obj <-  merge(x = soupx_objs$FLUX, 
+                          y = soupx_objs[2:3],
+                          merge.data = FALSE,
+                          add.cell.ids=names(soupx_objs),
+                          project="iPSC")
+# An object of class Seurat 
+# 36601 features across 21883 samples within 1 assay 
+# Active assay: RNA (36601 features, 0 variable features)
+#  3 layers present: counts.FLUX, counts.pSiMP, counts.Pulsatile
+saveRDS(merged_filt_obj,"../results/iPSC_filtered_merged_soupX_seurat_obj.RDS")
+```
+
+# Filtered Dataset Processing
+
+```{r eval=FALSE}
+merged_filt_obj <- readRDS("../results/iPSC_filtered_merged_soupX_seurat_obj.RDS")
+
+job::job({
+  #regularized negative binomial regression to normalize UMI count data
+  #Note that this single command replaces NormalizeData(), ScaleData(), and FindVariableFeatures().
+  merged_filt_obj <- SCTransform(merged_filt_obj,
+                           assay="RNA",
+                           new.assay.name = "SCT",
+                           vars.to.regress = "filtered_percent.mt", # percent.mt to filtered_percent.mt Q. why not ribo?
+                           method = "glmGamPoi",
+                           return.only.var.genes = TRUE,
+                           verbose = FALSE)  %>% 
+      RunPCA(npcs = 50, verbose = FALSE) %>%
+      RunUMAP(reduction = "pca",
+              dims = 1:50, 
+              n.components = 3,
+              n.neighbors = 30,# default 30
+              metric = "cosine",
+              min.dist = 0.2, # default 0.3
+              return.model = TRUE,
+              verbose = T) 
+  
+  merged_filt_obj <- merged_filt_obj %>% 
+      FindNeighbors(reduction = "pca",
+                    dims = 1:50, 
+                    k.param = 20,
+                    nn.method = "annoy",
+                    annoy.metric = "cosine",
+                    n.trees = 100,
+                    verbose = T)
+  
+  merged_filt_obj <- merged_filt_obj %>% 
+      FindClusters(resolution = c(0.1,0.3,0.5, 0.7, 1.0), 
+                   algorithm = 2, 
+                   verbose = T) 
+  
+  merged_filt_obj <- merged_filt_obj %>% 
+      FindClusters(resolution = 1.5, 
+                   algorithm = 2, 
+                   verbose = T)
+  
+  merged_filt_obj <- AddMetaData(merged_filt_obj,
+                                 as.data.frame(merged_filt_obj@reductions$umap@cell.embeddings))
+  
+  merged_filt_obj
+}, import = c("merged_filt_obj"))
+```
+
+```{r eval=FALSE}
+job::job({
+  saveRDS(merged_filt_obj, 
+          "../results/iPSC_filtered_merged_soupX_SCT_seurat_obj.RDS")
+}, import = c("merged_filt_obj"))
+```
+
+
+```{r}
+merged_filt_obj$id <- factor(merged_filt_obj$orig.ident, levels = c(unique(merged_filt_obj$orig.ident)))
+merged_filt_obj$seurat_clusters <- merged_filt_obj$SCT_snn_res.1
+```
+
+```{r fig.height=8}
+# pdf("../figures/filtered_merged_results/sct_transform_100PCs_elbow_plot.pdf", height = 7, width=10)
+ElbowPlot(merged_filt_obj,ndims = 50, reduction = "pca")
+# dev.off()
+# # 
+# pdf("../figures/filtered_merged_results/transform_1-4PCs_loadings.pdf", height = 10, width=7)
+VizDimLoadings(merged_filt_obj, dims = 1:4, reduction = "pca")
+# dev.off()
+
+# pdf("../figures/filtered_merged_results/byLouvainCluster_sct_UMAP.pdf",height = 10, width= 17)
+merged_filt_obj[[]]
+DimPlot(merged_filt_obj, group.by = "SCT_snn_res.0.1", dims = c(1,2)) 
+DimPlot(merged_filt_obj, group.by = "SCT_snn_res.0.3", dims = c(1,2)) 
+DimPlot(merged_filt_obj, group.by = "SCT_snn_res.0.5", dims = c(1,2)) 
+DimPlot(merged_filt_obj, group.by = "SCT_snn_res.0.7", dims = c(1,2)) 
+#+
+  # scale_color_manual()
+# dev.off()
+```
+
+```{r fig.height=10}
+filt_d1 <- DimPlot(merged_filt_obj, 
+        group.by = "id",
+        label = T, 
+        repel = T,
+        label.size = 7) + 
+  scale_color_manual(values = colors_vector)
+
+# png("../figures/filtered_merged_results/iPSC_seurat_UMAP_filtered.png", height = 15, width = 25,
+# units = "in", res = 150)
+filt_d1
+# dev.off()
+
+filt_s1 <- DimPlot(merged_filt_obj, 
+        group.by = c("id"),
+        label = T, 
+        repel = T,
+        label.size = 7) + 
+  scale_color_manual(values = colors_vector)
+
+# png("../figures/filtered_merged_results/iPSC_seurat_UMAP_splitBy_sample_filtered.png",
+#     height = 15, width = 25, units = "in", res = 150)
+filt_s1
+# dev.off()
+```
+
+
+```{r fig.height=10}
+library(plotly)
+fig <- plot_ly(merged_filt_obj@meta.data,
+               x = ~umap_1, y = ~umap_2, z = ~umap_3, 
+               color = ~id,
+               colors = colors_vector)
+fig <- fig %>% 
+  add_markers( 
+    marker = list(size = 1), 
+    text = merged_filt_obj@meta.data$orig.ident,
+      hoverinfo = 'text')
+
+# fig <- fig %>% plotly::layout(scene = list(xaxis = list(title = 'PC1'),
+#                      yaxis = list(title = 'PC2'),
+#                      zaxis = list(title = 'PC3')))
+
+fig
+```
+
+
+
+
+

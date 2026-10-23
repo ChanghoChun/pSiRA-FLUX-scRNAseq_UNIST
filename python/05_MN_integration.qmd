@@ -1,0 +1,221 @@
+---
+title: "05_MN_integration"
+format: html
+---
+
+
+To generate the integrated object of Rayon's MN + Juyoung's iPSC-MNs.
+
+
+
+# import Data
+```{r}
+library(dplyr)
+
+library(Seurat)
+library(magrittr)
+# install.packages("anndata")
+library(anndata)
+```
+```{r}
+library(reticulate)
+reticulate::use_condaenv(condaenv = "scanpy_in_r")  # conda env with scanpy + scvi-tools
+reticulate::py_config()
+sc <- import("scanpy", convert = FALSE)
+scvi <- import("scvi", convert = FALSE)
+# scib <- import("scib_metrics.benchmark", convert = FALSE)
+
+# library(rJava)
+```
+
+```{r}
+# juyoung's IPSC
+if(!exists("iPSC")){            # 26945 86943 
+  iPSC <- readRDS("../results/iPSC_filtered_merged_soupX_scanvilabeled_seurat_obj_juyoung.RDS")
+  DefaultAssay(iPSC) <- "RNA" 
+}
+
+# Rayon's
+if(!exists("embryonic_sc_rayon")){ # 33538 x 43485 
+  embryonic_sc_rayon <- readRDS("../data/reference/GSE171892_merged_postqc_SCT_seurat_obj.RDS") # embryonic period 3 - 8 weeks
+  DefaultAssay(embryonic_sc_rayon) <- "RNA"
+}
+```
+
+```{r}
+embryonic_sc_rayon@meta.data <- embryonic_sc_rayon@meta.data %>%
+  dplyr::rename(
+    subtype_annotation = type_step2,
+    top_level_annotation = type_step1
+  ) %>%
+  mutate(
+    new_consolidated_annotation = case_when(
+      grepl("FP", subtype_annotation) ~ "Floor plate cells (FP)",
+      grepl("MFOL|MOL|NFOL|Oligo", subtype_annotation) ~ "Oligodendrocytes (Oligo)",
+      grepl("RP", subtype_annotation) ~ "Roof plate (RP)",
+      grepl("^MN", subtype_annotation) ~ "Motor neurons (MN)",
+      grepl("^pMN", subtype_annotation) ~ "Motor neuron progenitors (MNP)",
+      grepl("Neural_crest_progenitor", subtype_annotation) ~ "Neural crest progenitors cells (NCP)",
+      grepl("Null_Neuron", subtype_annotation) ~ "Pan neurons (Pan-N)",
+      grepl("Null_Progenitor", subtype_annotation) ~ "Neural progenitor cells (NPC)",
+      grepl("Sensory_neuron_progenitor", subtype_annotation) ~ "Dorsal progenitors (DP)",
+      grepl("Unspecialised_sensory_neuron", subtype_annotation) ~ "Sensory neurons (SN)",
+      # added on 2024.11.01
+      grepl("LTMR", subtype_annotation) ~ "Peripheral neuron (PN)",
+      grepl("dl", subtype_annotation) ~ "Dorsal interneuron (DI)",
+      grepl("dp", subtype_annotation) ~ "Dorsal progenitor (DP)",
+      grepl("^p[0-9]", subtype_annotation) ~ "Ventral progenitor (VP)",
+      TRUE ~ subtype_annotation  # fallback to the original annotation if no match is found
+    ),
+    # new_consolidated_annotation_abbr = gsub(".*\\((.*)\\).*", "\\1", new_consolidated_annotation)
+  )
+```
+
+## subset of (v)MNs
+```{r}
+# subset of MNs
+iPSC_MN <- subset(iPSC, subset = new_consolidated_annotation %in% c("Motor neurons (MN)", "Visceral motor neurons (v-MN)"))
+embryonic_sc_rayon_MN <- subset(embryonic_sc_rayon, subset = new_consolidated_annotation %in% c("Motor neurons (MN)"))
+```
+
+```{r}
+# find common features between objects
+rnames <- sapply(list(iPSC_MN, embryonic_sc_rayon_MN), rownames) 
+names(rnames) <- c("iPSC_MN", "embryonic_sc_rayon_MN")
+lapply(rnames, head, n=30)
+sapply(rnames, length)
+common <- purrr::reduce(rnames, intersect)
+length(common) # 31,915 names in common in RNA assay 
+```
+
+## merge
+```{r}
+iPSC_MN$sample <- "iPSC"                # 2991
+embryonic_sc_rayon_MN$sample <- "Rayon" # 2326
+
+# merge the objects 
+merged_meta_MN <- iPSC_MN@meta.data %>% 
+  bind_rows(., select(embryonic_sc_rayon_MN@meta.data, everything()))
+
+iPSC_MN <- JoinLayers(iPSC_MN)
+embryonic_sc_rayon_MN <- JoinLayers(embryonic_sc_rayon_MN)
+merged_MN_modifiedbarcode <-  CreateSeuratObject(counts = list("ipsc"=LayerData(iPSC_MN, layer = 'counts')[common,],
+                                                                "embryonic_sc_rayon"=LayerData(embryonic_sc_rayon_MN, layer = 'counts')[common,]), 
+                                                 meta.data = merged_meta_MN)
+
+# Note: scvi-tools requires raw gene expression
+DefaultAssay(merged_MN_modifiedbarcode) <- "RNA"
+merged_MN_scanvi_obj <- DietSeurat(merged_MN_modifiedbarcode, assays = "RNA")
+
+# re-join layers since convertFormat expects a Seurat v3 object https://github.com/satijalab/seurat/issues/8214 
+merged_MN_scanvi_obj <- JoinLayers(merged_MN_scanvi_obj)
+merged_MN_scanvi_obj <- NormalizeData(merged_MN_scanvi_obj)
+
+# transpose the raw counts (dense) matrix
+# note: MT genes have already been removed from the counts matrix
+tr_counts_mat <- t(as.matrix(LayerData(merged_MN_scanvi_obj, layer = "counts")))
+tr_norm_mat <- t(as.matrix(LayerData(merged_MN_scanvi_obj, layer = "data")))
+
+# convert to anndata object
+adata <- anndata::AnnData(
+  X = tr_norm_mat,
+  obs = as.data.frame(merged_MN_scanvi_obj@meta.data),
+  var = as.data.frame(GetAssay(merged_MN_scanvi_obj)[[]]),
+  layers = list(counts = tr_counts_mat,
+                lognorm = tr_norm_mat))
+
+dir.create("../results/integrated_MN", showWarnings = FALSE, recursive = TRUE)
+anndata::write_h5ad(adata, filename = file.path("../results/integrated_MN/iPSC_rayon_vMN_MN_merged.h5ad"))
+
+# if reticulate doesn't work
+# Save matrices and metadata as CSV
+# write.csv(tr_norm_mat, "tr_norm_mat.csv", row.names = TRUE)
+# write.csv(tr_counts_mat, "tr_counts_mat.csv", row.names = TRUE)
+# write.csv(as.data.frame(merged_MN_scanvi_obj@meta.data), "metadata.csv", row.names = TRUE)
+# write.csv(as.data.frame(GetAssay(merged_MN_scanvi_obj)[[]]), "features.csv", row.names = TRUE)
+# tr_counts_mat <- read_csv("tr_counts_mat.csv")
+```
+
+```{r}
+# MNs <- readRDS("../results/scanvi/iPSC_rayon_vMN_MN_merged.h5ad")
+```
+
+## integrated
+The integrated was processed via SCANVI. Please refer to 06_scANVI_MN_integration.py
+```{r}
+scanvi_query_adata <- anndata::read_h5ad("../results/integrated_MN/iPSC_juyoung_Rayon_vMN_MN_top2000_redox_pc30_epoch1000_nlayer2_128_0.8_gene_trained_umap.h5ad") 
+table(scanvi_query_adata$obs$new_consolidated_annotation)
+```
+```{r fig.width = 10}
+
+integrated_MN <- merged_MN_scanvi_obj
+# Update an anndata object & Add the latent representation to the adata object
+# scanvi_norm_mat <- py_to_r(scanvi_query[["layers"]][["counts"]])
+# scanvi_norm_mat
+
+# create dim reduction object 
+# DefaultAssay(integrated_MN) <- "integrated"
+
+
+# Convert Python AnnData layers to R matrices
+# counts_mat <- py_to_r(scanvi_query_adata$layers["counts"])
+# lognorm_mat <- py_to_r(scanvi_query_adata$layers["lognorm"])
+# 
+# # Optionally ensure row/column names are preserved
+# rownames(counts_mat) <- rownames(lognorm_mat) <- scanvi_query_adata$obs_names
+# colnames(counts_mat) <- colnames(lognorm_mat) <- scanvi_query_adata$var_names
+# 
+# rownames(lognorm_mat) <- rownames(lognorm_mat) <- scanvi_query_adata$obs_names
+# colnames(lognorm_mat) <- colnames(lognorm_mat) <- scanvi_query_adata$var_names
+# 
+# # Create a new Seurat assay
+# integrated_assay <- CreateAssayObject(counts = counts_mat)
+# integrated_assay_log <- CreateAssayObject(counts = lognorm_mat)
+# 
+# # Add it to your Seurat object
+# integrated_MN[["integrated"]] <- integrated_assay
+
+
+
+
+integrated_MN[['scanvi']] <- CreateDimReducObject(embeddings = scanvi_query_adata$obsm[['X_scANVI']] %>%
+                                               set_rownames(scanvi_query_adata$obs_names),
+                                               key = "scanvi_",
+                                               assay = 'RNA')
+# create assay of the raw counts stored in the scANVI AnnData
+integrated_MN[["SCANVI"]] <- scanvi_query_adata$layers[["counts"]]
+# integrated_MN <- AddMetaData(integrated_MN, scanvi_query_adata$obs$predictions_scanvi, col.name = "predictions_scanvi")
+integrated_MN <- AddMetaData(integrated_MN, scanvi_query_adata$obs$new_consolidated_annotation, col.name = "new_consolidated_annotation")
+# table(integrated_MN[[]]$predictions_scanvi)
+table(integrated_MN[[]]$new_consolidated_annotation)
+
+# integrated_MN@meta.data <- integrated_MN@meta.data %>% # 86954
+#   mutate(new_consolidated_annotation = case_when(
+#     predictions_scanvi %in% c("Alpha motor neurons (a-MN)", "Gamma motor neurons (g-MN)") ~ "Motor neurons (MN)",
+#     predictions_scanvi %in% c("Ventral fibrous astrocytes (VFA)") ~ "Astrocytes (AC)",
+#     predictions_scanvi == "iPSCs/NPC" ~ "Neuroepithelial cells (NEP)",
+#     TRUE ~ predictions_scanvi))
+DimPlot(integrated_MN, reduction = "scanvi", group.by="orig.ident")
+
+integrated_MN[["umap.scanvi"]] <- CreateDimReducObject(
+  embeddings = scanvi_query_adata$obsm[['X_umap']] %>%
+    set_rownames(scanvi_query_adata$obs_names),
+  key = "UMAPscanvi_",
+  assay = "RNA"
+)
+DimPlot(integrated_MN, reduction = "umap.scanvi", group.by = "new_consolidated_annotation")
+DimPlot(integrated_MN, reduction = "umap.scanvi", group.by = "sample")
+DimPlot(integrated_MN, reduction = "umap.scanvi", group.by = "orig.ident")
+
+
+integrated_MN
+
+saveRDS(integrated_MN, "../results/integrated_MN/iPSC_Rayon_MN_label_transferred_batchcorrectd_seurat_obj.RDS")
+```
+
+# sessioninfo
+```{r}
+sessionInfo()
+```
+
+

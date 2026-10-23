@@ -1,0 +1,102 @@
+---
+title: "03_celltype_annotation"
+format: html
+editor: visual
+---
+
+## SCANVI annotation
+
+```{r}
+library(anndata)
+library(Seurat)
+library(dplyr)
+library(magrittr)
+```
+
+# Cell type annotation
+
+The reference matrix was generated based on Andersen's and Rayon's paper. Please refer to 02_scANVI_reference_training.py (reference model) and 04_scANVI_label_transfer.py (label transfer) for details.
+
+```{r eval=TRUE}
+merged_filt_obj <- readRDS("../results/iPSC_filtered_merged_soupX_seurat_obj.RDS")
+# logNormalize to be consistent with the reference dataset
+# though SCVI tools does not use normalized counts (only raw), there are post processing steps that require it, like PCA (?).
+DefaultAssay(merged_filt_obj) <- 'RNA'
+merged_filt_obj <- NormalizeData(merged_filt_obj, normalization.method = "LogNormalize")
+
+# join layers to export the full raw counts matrix for all samples (layers)
+merged_filt_obj[["RNA"]] <- JoinLayers(merged_filt_obj[["RNA"]])
+```
+
+```{r eval=FALSE}
+# create an anndata object with transposed counts matrices
+ipsc_adata <- AnnData(
+  X = t(as.matrix(LayerData(merged_filt_obj, assay = 'RNA', layer = "data"))), 
+  obs = as.data.frame(merged_filt_obj@meta.data),
+  layers = list(counts = t(as.matrix(LayerData(merged_filt_obj,assay = 'RNA', layer = "counts"))))
+)
+# Add matching columns for the celltype annotation from reference dataset
+ipsc_adata$obs$dataset <- "iPSC"
+ipsc_adata$obs$donor <- ipsc_adata$obs$orig.ident
+
+anndata::write_h5ad(ipsc_adata, "../results/iPSC_filtered_merged_soupX_normalized_adata_obj.h5ad")
+```
+
+# Merge Scanvi result back to Seurat object
+
+```{r}
+# remotes::install_github("pmbio/MuDataSeurat")
+# library(MuDataSeurat)
+# scanvi_query <- ReadH5AD("../results/scanvi/Andersen_Rayon_sub_tranferred_ipsc_data_umap.h5ad")
+# DimPlot(scanvi_query, reduction = "umap")
+# 
+# scanvi_query@meta.data <- scanvi_query@meta.data %>%
+#   rename_with(~c("scanvi_orig.ident","scanvi_nCount_RNA", "scanvi_nfeature_RNA"), c(13, 14,15))
+# 
+# # new consolidated
+# scanvi_query@meta.data <- scanvi_query@meta.data %>% # 21883
+#   mutate(new_consolidated_annotation = case_when(
+#     predictions_scanvi %in% c("Gamma motor neurons (g-MN)") ~ "Motor neurons (MN)",
+#     predictions_scanvi %in% c("Ventral fibrous astrocytes (VFA)") ~ "Astrocytes (AC)",
+#     predictions_scanvi == "iPSCs/NPC" ~ "Neuroepithelial cells (NEP)",
+#     TRUE ~ predictions_scanvi))
+# saveRDS(scanvi_query, "../results/iPSC_filtered_merged_soupX_scanvilabeled_seurat_obj.RDS")
+```
+
+```{r fig.width = 10}
+ipsc_obj <- readRDS( "../results/iPSC_filtered_merged_soupX_SCT_seurat_obj.RDS")
+# scanvi_query <- readRDS("../results/iPSC_filtered_merged_soupX_scanvilabeled_seurat_obj.RDS")
+# scanvi_query
+scanvi_query_adata <- anndata::read_h5ad("../results/scanvi/Andersen_Rayon_sub_tranferred_ipsc_data_umap.h5ad")
+
+ipsc_obj[['scanvi']] <- CreateDimReducObject(embeddings = scanvi_query_adata$obsm[['X_scANVI']] %>%
+                                             set_rownames(scanvi_query_adata$obs_names),
+                                             key = "scanvi_",
+                                             assay = 'RNA')
+ipsc_obj <- AddMetaData(ipsc_obj, scanvi_query_adata$obs$predictions_scanvi, col.name = "predictions_scanvi")
+ipsc_obj@meta.data <- ipsc_obj@meta.data %>% # 86954
+  mutate(new_consolidated_annotation = case_when(
+    predictions_scanvi %in% c("Alpha motor neurons (a-MN)", "Gamma motor neurons (g-MN)") ~ "Motor neurons (MN)",
+    predictions_scanvi %in% c("Ventral fibrous astrocytes (VFA)") ~ "Astrocytes (AC)",
+    predictions_scanvi == "iPSCs/NPC" ~ "Neuroepithelial cells (NEP)",
+    TRUE ~ predictions_scanvi))
+# DimPlot(ipsc_obj, reduction = "scanvi")
+
+ipsc_obj[["umap.scanvi"]] <- CreateDimReducObject(
+  embeddings = scanvi_query_adata$obsm[['X_umap']] %>%
+    set_rownames(scanvi_query_adata$obs_names),
+  key = "UMAPscanvi_",
+  assay = "RNA"
+)
+
+DimPlot(ipsc_obj, reduction = "umap.scanvi", group.by = "new_consolidated_annotation")
+
+DimPlot(ipsc_obj, reduction = "umap.scanvi", group.by = "orig.ident")
+saveRDS(ipsc_obj, "../results/iPSC_filtered_merged_soupX_scanvilabeled_seurat_obj_juyoung.RDS")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
