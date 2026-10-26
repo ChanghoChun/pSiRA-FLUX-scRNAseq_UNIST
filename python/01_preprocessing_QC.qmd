@@ -43,7 +43,7 @@ length(colors_vector)
 
 # DATA 
 
-To develope a novel method to enhance physiological relevance of iPSC-MNs using porous silica microparticles as a bioreactor during the differentiation. Three single-cell RNA sequencing (scRNA-seq) libraries— (1) Pulsatile, (2) PSiMP, and (3)FLUX—were generated from iPSC-derived motor neuron differentiation experiments. However, each experiment used a different approach in terms of how the porous silica microparticles were applied.
+To develop a method that enhances the physiological relevance of iPSC-MNs using porous silicon microparticles (pSiMPs) for sustained retinoic acid delivery during differentiation. Three single-cell RNA sequencing (scRNA-seq) libraries, (1) Pulsatile, (2) pSiMP and (3) FLUX, were generated from iPSC-derived motor neuron differentiation experiments that differed in how retinoic acid and pSiMPs were applied.
 
 ## Sample Manifest
 

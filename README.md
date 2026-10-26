@@ -12,7 +12,7 @@ To cite this code, use the Zenodo DOI: **[Zenodo DOI]** (see `CITATION.cff`).
 |---|---|
 | Raw FASTQ files and Cell Ranger filtered matrices (3 libraries, day 25) | NCBI GEO, accession **[GSE number]** |
 | Human embryonic spinal cord scRNA-seq (Rayon et al., 2021) | GEO GSE171892 |
-| Second human spinal cord reference for scANVI (step 2) | [to be added with `python/`] |
+| Human developing spinal cord scRNA-seq (Andersen et al., 2023), second scANVI reference | GEO GSE188516 |
 
 Library names used in the code (`orig.ident`):
 
@@ -24,8 +24,8 @@ Library names used in the code (`orig.ident`):
 
 ## Workflow
 
-1. **Alignment**: Cell Ranger v7.0.1, reference GRCh38-2020-A. FASTQ to filtered gene-barcode matrices (deposited in GEO).
-2. **Quality control, integration and annotation** (`python/`, to be added): doublet removal (scDblFinder), MAD-based filtering (scuttle), ambient RNA correction (SoupX), SCTransform normalization, scANVI reference model and label transfer (scvi-tools v1.1.5). Output: the two Seurat objects listed in `R/00_config.R`, placed in `data/`.
+1. **Alignment**: Cell Ranger v7.0.1, reference GRCh38-2020-A. FASTQ to raw and filtered gene-barcode matrices. Filtered matrices are deposited in GEO; the raw (unfiltered) matrices used by SoupX in step 2 can be regenerated from the deposited FASTQ files with the same Cell Ranger version and reference.
+2. **Quality control, integration and annotation** (`python/`, see `python/README.md` for run order): doublet removal (scDblFinder), MAD-based filtering (scuttle), ambient RNA correction (SoupX), SCTransform normalization, scANVI reference model and label transfer (scvi-tools v1.1.5). Output: the two Seurat objects listed in `R/00_config.R`, placed in `data/`.
 3. **Figure analyses** (`R/`):
 
 | Script | Figure panels | Main outputs |
