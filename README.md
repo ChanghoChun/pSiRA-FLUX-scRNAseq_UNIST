@@ -1,10 +1,12 @@
 # FLUX scRNA-seq analysis code
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23679716.svg)](https://doi.org/10.5281/zenodo.23679716)
+
 Code for the single-cell RNA-seq analyses in:
 
 > Seong J.\*, Chun C.\*, Kim M., Bae Y., Park J., Kim J., Kang J.H., Park T.-E., Bothwell M., Smith A.S.T., Mack D.L., Joo J. FLUX: Facilitated long-term uninterrupted exposure of retinoic acid enhances transcriptomic and electrophysiological maturation of iPSC-derived motor neurons. *Nature Communications* (accepted in principle). \*Equal contribution.
 
-To cite this code, use the Zenodo DOI: **[Zenodo DOI]** (see `CITATION.cff`).
+To cite this code, use the Zenodo DOI **[10.5281/zenodo.23679716](https://doi.org/10.5281/zenodo.23679716)** (all versions; see `CITATION.cff`).
 
 ## Data
 
