@@ -34,7 +34,7 @@ Library names used in the code (`orig.ident`):
 | `01_Fig5_cell_types_and_markers.R` | 5b, 5c, 5d, 5e, 5f, 5g-i | UMAP, marker tables, feature plots, composition tables, MN marker means and violin plots |
 | `02_Fig6b_DEG_FLUX_vs_Pulsatile.R` | 6b | DEG table (FLUX vs Pulsatile MNs), volcano plot |
 | `03_Fig8_Spearman_vs_human_embryonic_MN.R` | 8b-g | Spearman correlation table (hiPSC vs embryonic somatic MNs) |
-| `GO/` (to be added) | 6c-f, 7a-d | GO enrichment and category-level analyses |
+| `GO/` | 6c-f | GO term tables with functional category and developmental stage assignments (Supplementary Data 1-4) |
 
 Each script lists the values reported in the manuscript next to the corresponding output, so results can be checked directly.
 
