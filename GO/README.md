@@ -9,4 +9,4 @@ Gene Ontology (GO) biological process terms underlying Fig. 6c-f (J. Seong). The
 | Supplementary Data 3 | FLUX GO terms relevant to the nervous system and MN function, assigned to four developmental stages | 6d-f |
 | Supplementary Data 4 | Pulsatile GO terms relevant to the nervous system and MN function, assigned to four developmental stages | 6d-f |
 
-Input gene lists are the DEGs produced by `R/02_Fig6b_DEG_FLUX_vs_Pulsatile.R`. GO enrichment was run with clusterProfiler `enrichGO` (biological process); grouping into functional categories and developmental stages was done manually as described in the Methods.
+Input gene lists are the DEGs produced by `R/02_Fig6b_DEG_FLUX_vs_Pulsatile.R`. GO enrichment settings and the manual grouping into functional categories and developmental stages are described in the Methods.
